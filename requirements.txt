@@ -1,0 +1,6 @@
+pyyaml
+ollama
+rich
+argparse
+requests
+openapi_spec_validator
