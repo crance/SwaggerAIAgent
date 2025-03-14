@@ -12,6 +12,7 @@ from openapi_spec_validator.exceptions import OpenAPISpecValidatorError
 
 console = Console()
 
+DEFAULT_MODEL = "deepseek-coder:6.7b"
 class SwaggerAPIAgent:
     def __init__(self, model_name=None, modelfile_path=None, ollama_host="http://localhost:11434", swagger_file=None):
         self.ollama_host = ollama_host
@@ -29,8 +30,8 @@ class SwaggerAPIAgent:
             self.model = model_name
         else:
             # No model specified, use a default
-            self.model = "deepseek-coder:6.7b"
-            console.print("[yellow]No model or modelfile specified, using default model 'deepseek-coder:6.7b'[/yellow]")
+            self.model = DEFAULT_MODEL
+            console.print("[yellow]No model or modelfile specified, using default model '{DEFAULT_MODEL}'[/yellow]")
 
         if swagger_file:
             self.load_swagger(swagger_file)
@@ -49,35 +50,87 @@ class SwaggerAPIAgent:
                 if match:
                     base_model = match.group(1)
                     model_name = f"swagger-{base_model}-agent"
+
+                    # Extract system prompt
+                    system_pattern = r'SYSTEM\s+"""([\s\S]*?)"""\s*'
+                    system_match = re.search(system_pattern, modelfile_content, re.DOTALL)
+                    system_prompt = system_match.group(1).strip() if system_match else None
+
+                    # Extract template
+                    template_pattern = r'TEMPLATE\s+"""([\s\S]*?)"""\s*'
+                    template_match = re.search(template_pattern, modelfile_content, re.DOTALL)
+                    template = template_match.group(1) if template_match else None
+
+                    # Extract parameters
+                    parameter_pattern = r'PARAMETER\s+(\w+)\s+([^\n\r]+)'
+                    parameter_matches = re.finditer(parameter_pattern, modelfile_content)
+
+                    parameters = {}
+                    stop_tokens = []
+                    for match in parameter_matches:
+                        param_name = match.group(1)
+                        param_value = match.group(2).strip()
+                        
+                        # Handle quoted values
+                        if (param_value.startswith('"') and param_value.endswith('"')) or \
+                        (param_value.startswith("'") and param_value.endswith("'")):
+                            param_value = param_value[1:-1]  # Remove quotes
+                        
+                        # Special handling for stop tokens
+                        if param_name == "stop":
+                            stop_tokens.append(param_value)
+                        else:
+                            # Convert numeric values to appropriate types
+                            try:
+                                if '.' in param_value:
+                                    param_value = float(param_value)
+                                else:
+                                    param_value = int(param_value)
+                            except ValueError:
+                                # Keep as string if not a number
+                                pass
+                                
+                            parameters[param_name] = param_value
+                    
+                    # Add the stop tokens to parameters if any were found
+                    if stop_tokens:
+                        parameters["stop"] = stop_tokens
+                        
                 else:
                     # Use a default name based on the filename
                     base_name = os.path.basename(modelfile_path).split('.')[0]
                     model_name = f"swagger-{base_name}-agent"
-            
+
             # Prepare the request data
             data = {
-                "name": model_name,
-                "modelfile": modelfile_content
+                "model": model_name,
+                "from": base_model,
+                "system": system_prompt,
+                "template": template,
+                "parameters": parameters
             }
+
+            # console.print(f"[blue]Sending request data: {json.dumps(data, indent=2)}[/blue]")
             
             # Make the API request to create/update the model
             response = requests.post(
                 f"{self.ollama_host}/api/create",
-                json=data
+                data=json.dumps(data)
             )
             
             if response.status_code == 200:
                 console.print(f"[green]Successfully created/updated model '{model_name}' from modelfile[/green]")
+                console.print(f"[green]'{response.text}'[/green]")
             else:
                 console.print(f"[red]Failed to create/update model: {response.text}[/red]")
-                console.print(f"[yellow]Falling back to default model 'llama3'[/yellow]")
-                model_name = "llama3"
+                console.print(f"[yellow]Falling back to default model '{DEFAULT_MODEL}'[/yellow]")
+                return DEFAULT_MODEL
                 
             return model_name
         except Exception as e:
             console.print(f"[red]Error creating model from modelfile: {str(e)}[/red]")
-            console.print(f"[yellow]Falling back to default model 'llama3'[/yellow]")
-            return "llama3"
+            console.print(f"[yellow]Falling back to default model '{DEFAULT_MODEL}'[/yellow]")
+            return DEFAULT_MODEL
 
     def load_swagger(self, swagger_file):
         """Load and parse a Swagger/OpenAPI specification file"""
@@ -114,7 +167,7 @@ class SwaggerAPIAgent:
                 # The validate function handles both OpenAPI 2.0 and 3.0
                 validate(self.swagger_data)
                 console.print("API specification validated successfully.", style="bold green")
-            except OpenAPIValidationError as e:
+            except OpenAPISpecValidatorError as e:
                 console.print(f"Warning: Specification validation error: {e}", style="bold yellow")
                 console.print("Continuing with invalid specification...", style="yellow")
 
@@ -563,10 +616,10 @@ Please analyze this API to determine which endpoint(s) would best serve the user
 
 def main():
     parser = argparse.ArgumentParser(description="Swagger API Agent")
-    parser.add_argument("--swagger", type=str, default="https://petstore.swagger.io/v2/swagger.json", help="Path to Swagger/OpenAPI specification file or URL")
+    parser.add_argument("--swagger", type=str,default="https://petstore.swagger.io/v2/swagger.json", help="Path to Swagger/OpenAPI specification file or URL")
     parser.add_argument("--model", type=str, help="Ollama model name")
-    # parser.add_argument("--modelfile", type=str, default= "models/DavidSwag.modelfile", help="Path to Ollama modelfile (if provided, takes precedence over model)")
-    parser.add_argument("--modelfile", type=str, help="Path to Ollama modelfile (if provided, takes precedence over model)")
+    parser.add_argument("--modelfile", type=str, default= "models/Modelfile.swaggeragent", help="Path to Ollama modelfile (if provided, takes precedence over model)")
+    # parser.add_argument("--modelfile", type=str, help="Path to Ollama modelfile (if provided, takes precedence over model)")
     parser.add_argument("--ollama-host", type=str, default="http://localhost:11434", help="Ollama API host URL")
     args = parser.parse_args()
 
